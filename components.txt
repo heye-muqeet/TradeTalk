@@ -1,0 +1,285 @@
+// InvoiceScreen.tsx - Updated voice handling logic
+import React, { useState, useEffect, useCallback } from "react";
+import { View, Text, TouchableOpacity, FlatList } from "react-native";
+import LottieView from "lottie-react-native";
+import Icon from "react-native-vector-icons/Ionicons";
+import Voice from "@react-native-voice/voice";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import styles from "./InvoiceScreen.styles";
+import { THEME } from "../../constants/constants";
+import ChatMessage from "./components/ChatMessage";
+import VoiceButton from "./components/VoiceButton";
+import OptionsBar from "./components/OptionsBar";
+import InvoiceEditor from "./components/InvoiceEditor";
+import InvoicePreview from "./components/InvoicePreview";
+import { InvoiceDetails, Message, Template } from "./types";
+
+const InvoiceScreen: React.FC = () => {
+    const navigation = useNavigation<any>();
+    const [messages, setMessages] = useState<Message[]>([
+        { sender: "ai", text: "Do you want to create an invoice?" }
+    ]);
+    const [isListening, setIsListening] = useState(false);
+    const [showManualEditor, setShowManualEditor] = useState(false);
+    const [invoiceDetails, setInvoiceDetails] = useState<InvoiceDetails>({
+        clientName: "",
+        amount: "",
+        items: [{ description: "", quantity: 1, rate: 0 }],
+        notes: ""
+    });
+    const [templates, setTemplates] = useState<Template[]>([
+        { id: '1', name: 'Standard Invoice' },
+        { id: '2', name: 'Professional Services' },
+        { id: '3', name: 'Product Sales' }
+    ]);
+    const [selectedTemplate, setSelectedTemplate] = useState("1");
+    const [showPreview, setShowPreview] = useState(false);
+    // Track the conversation state to handle multi-step voice commands
+    const [conversationState, setConversationState] = useState<"initial" | "awaitingClientInfo" | "awaitingConfirmation">("initial");
+
+    useEffect(() => {
+        Voice.onSpeechResults = (e) => {
+            const command = e.value?.[0] || "";
+            handleVoiceCommand(command);
+        };
+    
+        Voice.onSpeechStart = () => setIsListening(true);
+        Voice.onSpeechEnd = () => setIsListening(false);
+    
+        return () => cleanup();
+    }, [conversationState]); // Add conversationState to dependency array
+
+    useFocusEffect(
+        useCallback(() => {
+            return () => cleanup();
+        }, [])
+    );
+
+    const cleanup = () => {
+        Voice.stop();
+        Voice.removeAllListeners();
+        setIsListening(false);
+    };
+
+    const startListening = async () => {
+        try {
+            if (!isListening) {
+                setIsListening(true);
+                await Voice.start("en-US");
+            }
+        } catch (e) {
+            console.error("Voice recognition error:", e);
+        }
+    };
+
+    const stopListening = async () => {
+        try {
+            setIsListening(false);
+            await Voice.stop();
+        } catch (e) {
+            console.error("Error stopping voice recognition:", e);
+        }
+    };
+
+    const parseVoiceInput = (input: string) => {
+        // Extract client name (anything between "for" and "for $")
+        const clientNameMatch = input.match(/for\s+([^$]+?)\s+for\s+\$/i);
+        const clientName = clientNameMatch ? clientNameMatch[1].trim() : "";
+        
+        // Extract amount (any number after "$")
+        const amountMatch = input.match(/\$\s*(\d+(?:\.\d+)?)/);
+        const amount = amountMatch ? amountMatch[1] : "";
+        
+        return { clientName, amount };
+    };
+
+    const handleVoiceCommand = (command: string) => {
+        stopListening();
+        setMessages((prev) => [...prev, { sender: "user", text: command }]);
+
+        // First step - Initial response to "Do you want to create an invoice?"
+        if (conversationState === "initial") {
+            if (command.toLowerCase().includes("yes")) {
+                // If user also provided client and amount info in the same command
+                if (command.toLowerCase().includes("for") && command.toLowerCase().includes("$")) {
+                    handleClientInfoProvided(command);
+                } else {
+                    // User just said "yes" without details - ask for details
+                    setMessages((prev) => [...prev, { 
+                        sender: "ai", 
+                        text: "Please specify the client name and amount. For example, say 'for ABC Company for $500'." 
+                    }]);
+                    setConversationState("awaitingClientInfo");
+                }
+            } else if (command.toLowerCase().includes("no")) {
+                setShowManualEditor(true); // Directly open manual editor
+            } else {
+                setMessages((prev) => [...prev, { 
+                    sender: "ai", 
+                    text: "I didn't understand that. Would you like to create an invoice? Say 'yes' or 'no'." 
+                }]);
+            }
+        } 
+        // Second step - User is providing client information after saying "yes"
+        else if (conversationState === "awaitingClientInfo") {
+            if (command.toLowerCase().includes("for")) {
+                handleClientInfoProvided(command);
+            } else {
+                setMessages((prev) => [...prev, { 
+                    sender: "ai", 
+                    text: "Please specify the client name and amount. For example, say 'for ABC Company for $500'." 
+                }]);
+            }
+        }
+        // Third step - User is confirming or editing the invoice 
+        else if (conversationState === "awaitingConfirmation") {
+            if (command.toLowerCase().includes("send") || 
+                command.toLowerCase().includes("confirm") || 
+                command.toLowerCase().includes("approve")) {
+                sendInvoice();
+                setConversationState("initial"); // Reset conversation state
+            } else if (command.toLowerCase().includes("edit") || command.toLowerCase().includes("change")) {
+                setShowPreview(false);
+                setShowManualEditor(true);
+            } else {
+                setMessages((prev) => [...prev, { 
+                    sender: "ai", 
+                    text: "Would you like to send this invoice or make edits? Say 'send it' to confirm or 'edit' to make changes." 
+                }]);
+            }
+        }
+    };
+
+    // Extracted function to handle client info provided via voice
+    const handleClientInfoProvided = (command: string) => {
+        // Parse client name and amount
+        const { clientName, amount } = parseVoiceInput(command);
+        
+        // If we don't have both pieces of information
+        if (!clientName || !amount) {
+            setMessages((prev) => [...prev, { 
+                sender: "ai", 
+                text: "I couldn't catch all the details. Please say 'for [CLIENT NAME] for $[AMOUNT]'." 
+            }]);
+            setConversationState("awaitingClientInfo");
+            return;
+        }
+        
+        // Update invoice details
+        setInvoiceDetails(prev => ({
+            ...prev,
+            clientName,
+            amount
+        }));
+        
+        // Automatically show preview
+        setShowPreview(true);
+        setMessages((prev) => [...prev, { 
+            sender: "ai", 
+            text: `I've prepared an invoice for ${clientName} for $${amount}. Say 'send it' to confirm or 'edit' to make changes.` 
+        }]);
+        setConversationState("awaitingConfirmation");
+    };
+
+    const sendInvoice = () => {
+        // Logic to send the invoice would go here
+        setMessages((prev) => [...prev, { 
+            sender: "ai", 
+            text: `Invoice sent to ${invoiceDetails.clientName} for $${invoiceDetails.amount}. It has been saved to your records.` 
+        }]);
+        setShowPreview(false);
+        
+        // Reset invoice details
+        setInvoiceDetails({
+            clientName: "",
+            amount: "",
+            items: [{ description: "", quantity: 1, rate: 0 }],
+            notes: ""
+        });
+        
+        // Reset conversation state
+        setConversationState("initial");
+    };
+
+    const calculateTotal = () => {
+        return invoiceDetails.items.reduce((sum, item) => {
+            return sum + (item.quantity * item.rate);
+        }, 0).toFixed(2);
+    };
+
+    // For manual invoice editor - need to reset conversation state
+    const handleOpenManualEditor = () => {
+        setShowManualEditor(true);
+        setConversationState("initial");
+    };
+
+    return (
+        <View style={styles.container}>
+            {/* Header */}
+            <View style={styles.header}>
+                <TouchableOpacity onPress={() => navigation.goBack()}>
+                    <Icon name="arrow-back" size={25} color="white" />
+                </TouchableOpacity>
+                <Text style={styles.headerTitle}>TradeTalk</Text>
+                <TouchableOpacity onPress={() => navigation.navigate("SettingsScreen")}>
+                    <Icon name="settings-outline" size={25} color="white" />
+                </TouchableOpacity>
+            </View>
+
+            <FlatList
+                data={messages}
+                keyExtractor={(_, index) => index.toString()}
+                renderItem={({ item }) => <ChatMessage message={item} />}
+                contentContainerStyle={styles.chatContainer}
+            />
+            
+            <OptionsBar 
+                onManualInvoice={handleOpenManualEditor}
+            />
+            
+            <VoiceButton 
+                isListening={isListening}
+                onStartListening={startListening}
+                onStopListening={stopListening}
+            />
+            
+            <InvoiceEditor
+                visible={showManualEditor}
+                invoiceDetails={invoiceDetails}
+                setInvoiceDetails={setInvoiceDetails}
+                templates={templates}
+                selectedTemplate={selectedTemplate}
+                setSelectedTemplate={setSelectedTemplate}
+                onClose={() => {
+                    setShowManualEditor(false);
+                    setConversationState("initial");
+                }}
+                onPreview={() => {
+                    setShowManualEditor(false);
+                    setShowPreview(true);
+                    setConversationState("awaitingConfirmation");
+                }}
+            />
+            
+            <InvoicePreview
+                visible={showPreview}
+                invoiceDetails={invoiceDetails}
+                calculateTotal={calculateTotal}
+                onClose={() => {
+                    setShowPreview(false);
+                    setConversationState("initial");
+                }}
+                onEdit={() => {
+                    setShowPreview(false);
+                    setShowManualEditor(true);
+                }}
+                onSend={() => {
+                    setShowPreview(false);
+                    sendInvoice();
+                }}
+            />
+        </View>
+    );
+};
+
+export default InvoiceScreen;
